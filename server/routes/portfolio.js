@@ -1,47 +1,69 @@
 const express = require('express');
+const router = express.Router();
 const mongoose = require('mongoose');
 const Portfolio = require('../models/Portfolio'); // Assuming Portfolio model is defined in models/Portfolio.js
-const router = express.Router();
+const axios = require('axios');
 
-// Middleware to handle errors
-const asyncHandler = fn => (req, res, next) => {
-    Promise.resolve(fn(req, res, next)).catch(next);
+// Middleware to check if user is authenticated
+const isAuthenticated = (req, res, next) => {
+    if (req.isAuthenticated()) {
+        return next();
+    }
+    return res.status(401).json({ message: 'Unauthorized' });
 };
 
-// Get user's portfolio
-router.get('/:userId', asyncHandler(async (req, res) => {
-    const { userId } = req.params;
-    const portfolio = await Portfolio.findOne({ userId });
-    if (!portfolio) {
-        return res.status(404).json({ message: 'Portfolio not found' });
+// Fetch real-time portfolio data
+router.get('/:userId', isAuthenticated, async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const portfolio = await Portfolio.findOne({ userId });
+
+        if (!portfolio) {
+            return res.status(404).json({ message: 'Portfolio not found' });
+        }
+
+        // Fetch real-time data for each asset in the portfolio
+        const assetDataPromises = portfolio.assets.map(async (asset) => {
+            const response = await axios.get(`https://api.example.com/asset/${asset.symbol}`);
+            return {
+                symbol: asset.symbol,
+                quantity: asset.quantity,
+                price: response.data.price,
+                value: response.data.price * asset.quantity,
+            };
+        });
+
+        const assetData = await Promise.all(assetDataPromises);
+        const totalValue = assetData.reduce((acc, asset) => acc + asset.value, 0);
+
+        return res.status(200).json({ portfolio: assetData, totalValue });
+    } catch (error) {
+        console.error('Error fetching portfolio data:', error);
+        return res.status(500).json({ message: 'Internal server error' });
     }
-    res.json(portfolio);
-}));
+});
 
-// Create or update user's portfolio
-router.post('/:userId', asyncHandler(async (req, res) => {
-    const { userId } = req.params;
-    const { assets } = req.body; // Expecting assets to be an array of asset objects
+// Update portfolio asset
+router.put('/:userId/update', isAuthenticated, async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const { symbol, quantity } = req.body;
 
-    if (!Array.isArray(assets)) {
-        return res.status(400).json({ message: 'Assets must be an array' });
+        const portfolio = await Portfolio.findOneAndUpdate(
+            { userId, 'assets.symbol': symbol },
+            { $set: { 'assets.$.quantity': quantity } },
+            { new: true }
+        );
+
+        if (!portfolio) {
+            return res.status(404).json({ message: 'Portfolio or asset not found' });
+        }
+
+        return res.status(200).json({ message: 'Portfolio updated successfully', portfolio });
+    } catch (error) {
+        console.error('Error updating portfolio:', error);
+        return res.status(500).json({ message: 'Internal server error' });
     }
-
-    const portfolio = await Portfolio.findOneAndUpdate(
-        { userId },
-        { assets },
-        { new: true, upsert: true }
-    );
-
-    res.json(portfolio);
-}));
-
-// Real-time tracking endpoint (WebSocket or similar can be implemented here)
-router.get('/track/:userId', asyncHandler(async (req, res) => {
-    const { userId } = req.params;
-    // Logic for real-time tracking can be implemented here
-    // This could involve setting up a WebSocket connection or using a service like Socket.io
-    res.json({ message: 'Real-time tracking not implemented yet' });
-}));
+});
 
 module.exports = router;
